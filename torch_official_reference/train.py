@@ -45,6 +45,11 @@ def mlflow_log_meters(k, v, epoch):
         mlflow.log_metric(k, v, epoch)
 
 
+def mlflow_log_artifact(local_path, artifact_path):
+    if utils.is_main_process():
+        mlflow.log_artifact(local_path, artifact_path)
+
+
 def train_one_epoch(model,
                     criterion,
                     optimizer,
@@ -362,8 +367,14 @@ def main(args):
                 os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)))
             utils.save_on_master(
                 checkpoint, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if args.mlflow_log_model:  #TODO: Bug
-            mlflow.pytorch.log_model(model_without_ddp, f'model_epoch{epoch}')
+
+            mlflow_log_artifact(
+                os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)),
+                'model')
+            mlflow_log_artifact(
+                os.path.join(args.output_dir, 'checkpoint.pth'), 'model')
+        #if args.mlflow_log_model:  #TODO: Bug
+        #mlflow.pytorch.log_model(model_without_ddp, f'model_epoch{epoch}')
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -420,7 +431,7 @@ def get_args_parser(add_help=True):
                         default=10,
                         type=int,
                         help='print frequency')
-    parser.add_argument('--output-dir', default='.', help='path where to save')
+    parser.add_argument('--output-dir', help='path where to save')
     parser.add_argument('--mlflow-log-model',
                         action='store_true',
                         help='log model on MLflow')
