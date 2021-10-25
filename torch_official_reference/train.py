@@ -13,6 +13,7 @@ import utils
 
 import mlflow
 import numpy as np
+import torch.distributed as dist
 
 try:
     from apex import amp
@@ -20,13 +21,27 @@ except ImportError:
     amp = None
 
 
+def set_mlflow_on_master():
+    if utils.is_main_process():
+        tracking_server_uri = "http://10.10.10.9:4499"
+        mlflow.set_tracking_uri(tracking_server_uri)
+        mlflow.set_experiment("cifar100")
+
+
+def end_mlflow_on_master():
+    if utils.is_main_process():
+        mlflow.end_run()
+
+
 def mlflow_log_args(args):
-    for k, v in vars(args).iteritems():
-        mlflow.log_param(k, v)
+    if utils.is_main_process():
+        for k, v in vars(args).items():
+            mlflow.log_param(k, v)
 
 
 def mlflow_log_meters(k, v, epoch):
-    mlflow.log_metric(k, v, epoch)
+    if utils.is_main_process():
+        mlflow.log_metric(k, v, epoch)
 
 
 def train_one_epoch(model,
@@ -105,8 +120,8 @@ def evaluate(model, criterion, data_loader, device, epoch=-1, print_freq=100):
     metric_logger.synchronize_between_processes()
     if epoch != -1:
         mlflow_log_meters('eval_loss', metric_logger.loss.global_avg, epoch)
-        mlflow_log_meters('Avg(Acc@1)', metric_logger.acc1.global_avg, epoch)
-        mlflow_log_meters('Avg(Acc@5)', metric_logger.acc5.global_avg, epoch)
+        mlflow_log_meters('avg_acc1', metric_logger.acc1.global_avg, epoch)
+        mlflow_log_meters('avg_acc5', metric_logger.acc5.global_avg, epoch)
 
     print(' * Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f}'.format(
         top1=metric_logger.acc1, top5=metric_logger.acc5))
@@ -245,112 +260,118 @@ def main(args):
 
     utils.init_distributed_mode(args)
     print(args)
-    mlflow_log_args(args)
+    set_mlflow_on_master()
+    with mlflow.start_run() as run:
+        mlflow_log_args(args)
 
-    device = torch.device(args.device)
+        device = torch.device(args.device)
 
-    torch.backends.cudnn.benchmark = True
-    dataset, dataset_test, train_sampler, test_sampler = load_data(args)
+        torch.backends.cudnn.benchmark = True
+        dataset, dataset_test, train_sampler, test_sampler = load_data(args)
 
-    data_loader = torch.utils.data.DataLoader(dataset,
-                                              batch_size=args.batch_size,
-                                              sampler=train_sampler,
-                                              num_workers=args.workers,
-                                              pin_memory=True)
+        data_loader = torch.utils.data.DataLoader(dataset,
+                                                  batch_size=args.batch_size,
+                                                  sampler=train_sampler,
+                                                  num_workers=args.workers,
+                                                  pin_memory=True)
 
-    data_loader_test = torch.utils.data.DataLoader(dataset_test,
-                                                   batch_size=args.batch_size,
-                                                   sampler=test_sampler,
-                                                   num_workers=args.workers,
-                                                   pin_memory=True)
+        data_loader_test = torch.utils.data.DataLoader(
+            dataset_test,
+            batch_size=args.batch_size,
+            sampler=test_sampler,
+            num_workers=args.workers,
+            pin_memory=True)
 
-    print("Creating model")
-    model = torchvision.models.__dict__[args.model](pretrained=args.pretrained)
-    model.to(device)
-    if args.distributed and args.sync_bn:
-        model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
+        print("Creating model")
+        model = torchvision.models.__dict__[args.model](
+            pretrained=args.pretrained)
+        model.to(device)
+        if args.distributed and args.sync_bn:
+            model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
 
-    criterion = nn.CrossEntropyLoss()
+        criterion = nn.CrossEntropyLoss()
 
-    opt_name = args.opt.lower()
-    if opt_name == 'sgd':
-        optimizer = torch.optim.SGD(model.parameters(),
-                                    lr=args.lr,
-                                    momentum=args.momentum,
-                                    weight_decay=args.weight_decay)
-    elif opt_name == 'rmsprop':
-        optimizer = torch.optim.RMSprop(model.parameters(),
+        opt_name = args.opt.lower()
+        if opt_name == 'sgd':
+            optimizer = torch.optim.SGD(model.parameters(),
                                         lr=args.lr,
                                         momentum=args.momentum,
-                                        weight_decay=args.weight_decay,
-                                        eps=0.0316,
-                                        alpha=0.9)
-    else:
-        raise RuntimeError(
-            "Invalid optimizer {}. Only SGD and RMSprop are supported.".format(
-                args.opt))
+                                        weight_decay=args.weight_decay)
+        elif opt_name == 'rmsprop':
+            optimizer = torch.optim.RMSprop(model.parameters(),
+                                            lr=args.lr,
+                                            momentum=args.momentum,
+                                            weight_decay=args.weight_decay,
+                                            eps=0.0316,
+                                            alpha=0.9)
+        else:
+            raise RuntimeError(
+                "Invalid optimizer {}. Only SGD and RMSprop are supported.".
+                format(args.opt))
 
-    if args.apex:
-        model, optimizer = amp.initialize(model,
-                                          optimizer,
-                                          opt_level=args.apex_opt_level)
+        if args.apex:
+            model, optimizer = amp.initialize(model,
+                                              optimizer,
+                                              opt_level=args.apex_opt_level)
 
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                   step_size=args.lr_step_size,
-                                                   gamma=args.lr_gamma)
+        lr_scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=args.lr_step_size, gamma=args.lr_gamma)
 
-    model_without_ddp = model
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(
-            model, device_ids=[args.gpu])
-        model_without_ddp = model.module
-
-    if args.resume:
-        checkpoint = torch.load(args.resume, map_location='cpu')
-        model_without_ddp.load_state_dict(checkpoint['model'])
-        optimizer.load_state_dict(checkpoint['optimizer'])
-        lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
-        args.start_epoch = checkpoint['epoch'] + 1
-
-    if args.test_only:
-        evaluate(model, criterion, data_loader_test, device=device)
-        return
-
-    print("Start training")
-    start_time = time.time()
-    global iterations
-    iterations = 1
-    for epoch in range(args.start_epoch, args.epochs):
+        model_without_ddp = model
         if args.distributed:
-            train_sampler.set_epoch(epoch)
-        train_one_epoch(model, criterion, optimizer, data_loader, device,
-                        epoch, iterations, args.print_freq, args.apex)
-        lr_scheduler.step()
-        evaluate(model,
-                 criterion,
-                 data_loader_test,
-                 device=device,
-                 epoch=epoch)
-        if args.output_dir:
-            checkpoint = {
-                'model': model_without_ddp.state_dict(),
-                'optimizer': optimizer.state_dict(),
-                'lr_scheduler': lr_scheduler.state_dict(),
-                'epoch': epoch,
-                'args': args
-            }
-            utils.save_on_master(
-                checkpoint,
-                os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)))
-            utils.save_on_master(
-                checkpoint, os.path.join(args.output_dir, 'checkpoint.pth'))
-        if args.mlflow_log_model:
-            mlflow.pytorch.log_model(model,
-                                     'model_epoch{epoch}'.format(epoch=epoch))
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[args.gpu])
+            model_without_ddp = model.module
 
-    total_time = time.time() - start_time
-    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
-    print('Training time {}'.format(total_time_str))
+        if args.resume:
+            checkpoint = torch.load(args.resume, map_location='cpu')
+            model_without_ddp.load_state_dict(checkpoint['model'])
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+            args.start_epoch = checkpoint['epoch'] + 1
+
+        if args.test_only:
+            evaluate(model, criterion, data_loader_test, device=device)
+            return
+
+        print("Start training")
+        start_time = time.time()
+        global iterations
+        iterations = 1
+        for epoch in range(args.start_epoch, args.epochs):
+            if args.distributed:
+                train_sampler.set_epoch(epoch)
+            train_one_epoch(model, criterion, optimizer, data_loader, device,
+                            epoch, iterations, args.print_freq, args.apex)
+            lr_scheduler.step()
+            evaluate(model,
+                     criterion,
+                     data_loader_test,
+                     device=device,
+                     epoch=epoch)
+            if args.output_dir:
+                checkpoint = {
+                    'model': model_without_ddp.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'lr_scheduler': lr_scheduler.state_dict(),
+                    'epoch': epoch,
+                    'args': args
+                }
+                utils.save_on_master(
+                    checkpoint,
+                    os.path.join(args.output_dir,
+                                 'model_{}.pth'.format(epoch)))
+                utils.save_on_master(
+                    checkpoint, os.path.join(args.output_dir,
+                                             'checkpoint.pth'))
+            if args.mlflow_log_model:
+                mlflow.pytorch.log_model(model_without_ddp,
+                                         f'model_epoch{epoch}')
+
+        total_time = time.time() - start_time
+        total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+        print('Training time {}'.format(total_time_str))
+    #end_mlflow_on_master()
 
 
 def get_args_parser(add_help=True):
@@ -471,12 +492,6 @@ def get_args_parser(add_help=True):
 
 
 if __name__ == "__main__":
-    tracking_server_uri = "http://0.0.0.0:4499"
-    mlflow.set_tracking_uri(tracking_server_uri)
-    mlflow.set_experiment("cifar100")
-    mlflow.start_run()
 
     args = get_args_parser().parse_args()
     main(args)
-
-    mlflow.end_run()
