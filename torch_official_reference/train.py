@@ -11,10 +11,22 @@ from torchvision.transforms.functional import InterpolationMode
 import presets
 import utils
 
+import mlflow
+import numpy as np
+
 try:
     from apex import amp
 except ImportError:
     amp = None
+
+
+def mlflow_log_args(args):
+    for k, v in vars(args).iteritems():
+        mlflow.log_param(k, v)
+
+
+def mlflow_log_meters(k, v, epoch):
+    mlflow.log_metric(k, v, epoch)
 
 
 def train_one_epoch(model,
@@ -23,6 +35,7 @@ def train_one_epoch(model,
                     data_loader,
                     device,
                     epoch,
+                    iterations,
                     print_freq,
                     apex=False):
     model.train()
@@ -33,6 +46,7 @@ def train_one_epoch(model,
                             utils.SmoothedValue(window_size=10, fmt='{value}'))
 
     header = 'Epoch: [{}]'.format(epoch)
+    running_loss = []
     for image, target in metric_logger.log_every(data_loader, print_freq,
                                                  header):
         start_time = time.time()
@@ -56,9 +70,19 @@ def train_one_epoch(model,
         metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
         metric_logger.meters['img/s'].update(batch_size /
                                              (time.time() - start_time))
+        running_loss.append(loss.item())
+        mlflow_log_meters("batch_loss", loss.item(), iterations)
+        mlflow_log_meters("batch_lr", optimizer.param_groups[0]["lr"],
+                          iterations)
+
+        iterations += 1
+
+    #MLflow log
+    mlflow_log_meters('epoch_loss', np.mean(running_loss), epoch)
+    mlflow_log_meters('epoch_lr', optimizer.param_groups[0]["lr"], epoch)
 
 
-def evaluate(model, criterion, data_loader, device, print_freq=100):
+def evaluate(model, criterion, data_loader, device, epoch=-1, print_freq=100):
     model.eval()
     metric_logger = utils.MetricLogger(delimiter="  ")
     header = 'Test:'
@@ -79,6 +103,10 @@ def evaluate(model, criterion, data_loader, device, print_freq=100):
             metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
+    if epoch != -1:
+        mlflow_log_meters('eval_loss', metric_logger.loss.global_avg, epoch)
+        mlflow_log_meters('Avg(Acc@1)', metric_logger.acc1.global_avg, epoch)
+        mlflow_log_meters('Avg(Acc@5)', metric_logger.acc5.global_avg, epoch)
 
     print(' * Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f}'.format(
         top1=metric_logger.acc1, top5=metric_logger.acc5))
@@ -217,6 +245,7 @@ def main(args):
 
     utils.init_distributed_mode(args)
     print(args)
+    mlflow_log_args(args)
 
     device = torch.device(args.device)
 
@@ -289,13 +318,19 @@ def main(args):
 
     print("Start training")
     start_time = time.time()
+    global iterations
+    iterations = 1
     for epoch in range(args.start_epoch, args.epochs):
         if args.distributed:
             train_sampler.set_epoch(epoch)
         train_one_epoch(model, criterion, optimizer, data_loader, device,
-                        epoch, args.print_freq, args.apex)
+                        epoch, iterations, args.print_freq, args.apex)
         lr_scheduler.step()
-        evaluate(model, criterion, data_loader_test, device=device)
+        evaluate(model,
+                 criterion,
+                 data_loader_test,
+                 device=device,
+                 epoch=epoch)
         if args.output_dir:
             checkpoint = {
                 'model': model_without_ddp.state_dict(),
@@ -309,6 +344,9 @@ def main(args):
                 os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)))
             utils.save_on_master(
                 checkpoint, os.path.join(args.output_dir, 'checkpoint.pth'))
+        if args.mlflow_log_model:
+            mlflow.pytorch.log_model(model,
+                                     'model_epoch{epoch}'.format(epoch=epoch))
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
@@ -365,6 +403,9 @@ def get_args_parser(add_help=True):
                         type=int,
                         help='print frequency')
     parser.add_argument('--output-dir', default='.', help='path where to save')
+    parser.add_argument('--mlflow-log-model',
+                        action='store_true',
+                        help='log model on MLflow')
     parser.add_argument('--resume', default='', help='resume from checkpoint')
     parser.add_argument('--start-epoch',
                         default=0,
@@ -430,5 +471,12 @@ def get_args_parser(add_help=True):
 
 
 if __name__ == "__main__":
+    tracking_server_uri = "http://0.0.0.0:4499"
+    mlflow.set_tracking_uri(tracking_server_uri)
+    mlflow.set_experiment("cifar100")
+    mlflow.start_run()
+
     args = get_args_parser().parse_args()
     main(args)
+
+    mlflow.end_run()
