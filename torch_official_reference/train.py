@@ -94,66 +94,104 @@ def _get_cache_path(filepath):
     return cache_path
 
 
-def load_data(traindir, valdir, args):
+def load_data(args):
     # Data loading code
     print("Loading data")
-    resize_size, crop_size = 256, 224
-    interpolation = InterpolationMode.BILINEAR
-    if args.model == 'inception_v3':
-        resize_size, crop_size = 342, 299
-    elif args.model.startswith('efficientnet_'):
-        sizes = {
-            'b0': (256, 224),
-            'b1': (256, 240),
-            'b2': (288, 288),
-            'b3': (320, 300),
-            'b4': (384, 380),
-            'b5': (489, 456),
-            'b6': (561, 528),
-            'b7': (633, 600),
-        }
-        e_type = args.model.replace('efficientnet_', '')
-        resize_size, crop_size = sizes[e_type]
-        interpolation = InterpolationMode.BICUBIC
 
-    print("Loading training data")
-    st = time.time()
-    cache_path = _get_cache_path(traindir)
-    if args.cache_dataset and os.path.exists(cache_path):
-        # Attention, as the transforms are also cached!
-        print("Loading dataset_train from {}".format(cache_path))
-        dataset, _ = torch.load(cache_path)
-    else:
-        auto_augment_policy = getattr(args, "auto_augment", None)
-        random_erase_prob = getattr(args, "random_erase", 0.0)
-        dataset = torchvision.datasets.ImageFolder(
-            traindir,
-            presets.ClassificationPresetTrain(
+    auto_augment_policy = getattr(args, "auto_augment", None)
+    random_erase_prob = getattr(args, "random_erase", 0.0)
+    if args.data_name == 'ImageNet':
+        resize_size, crop_size = 256, 224
+        interpolation = InterpolationMode.BILINEAR
+        if args.model == 'inception_v3':
+            resize_size, crop_size = 342, 299
+        elif args.model.startswith('efficientnet_'):
+            sizes = {
+                'b0': (256, 224),
+                'b1': (256, 240),
+                'b2': (288, 288),
+                'b3': (320, 300),
+                'b4': (384, 380),
+                'b5': (489, 456),
+                'b6': (561, 528),
+                'b7': (633, 600),
+            }
+            e_type = args.model.replace('efficientnet_', '')
+            resize_size, crop_size = sizes[e_type]
+            interpolation = InterpolationMode.BICUBIC
+        data_path = ''
+
+        print("Loading training data")
+        st = time.time()
+        print("Loading dataset_train from {}".format(data_path))
+        dataset = torchvision.datasets.ImageNet(
+            root=data_path,
+            split='train',
+            transform=presets.ClassificationPresetTrain(
                 crop_size=crop_size,
                 auto_augment_policy=auto_augment_policy,
                 random_erase_prob=random_erase_prob))
-        if args.cache_dataset:
-            print("Saving dataset_train to {}".format(cache_path))
-            utils.mkdir(os.path.dirname(cache_path))
-            utils.save_on_master((dataset, traindir), cache_path)
-    print("Took", time.time() - st)
+        print("Took", time.time() - st)
 
-    print("Loading validation data")
-    cache_path = _get_cache_path(valdir)
-    if args.cache_dataset and os.path.exists(cache_path):
-        # Attention, as the transforms are also cached!
-        print("Loading dataset_test from {}".format(cache_path))
-        dataset_test, _ = torch.load(cache_path)
-    else:
-        dataset_test = torchvision.datasets.ImageFolder(
-            valdir,
-            presets.ClassificationPresetEval(crop_size=crop_size,
-                                             resize_size=resize_size,
-                                             interpolation=interpolation))
-        if args.cache_dataset:
-            print("Saving dataset_test to {}".format(cache_path))
-            utils.mkdir(os.path.dirname(cache_path))
-            utils.save_on_master((dataset_test, valdir), cache_path)
+        print("Loading validation data")
+        print("Loading dataset_train from {}".format(data_path))
+        dataset_test = torchvision.datasets.ImageNet(
+            root=data_path,
+            split='val',
+            transform=presets.ClassificationPresetEvalCifar10(
+                crop_size=crop_size,
+                resize_size=resize_size,
+                interpolation=interpolation))
+    elif args.data_name == 'CIFAR10':
+        resize_size, crop_size = 32, 32  #TODO:  다시 고민 필요
+        interpolation = InterpolationMode.BILINEAR
+        data_path = '/host_server/raid/jihunyoon/data/image_classification/'
+        print("Loading training data")
+        st = time.time()
+        print("Loading dataset_train from {}".format(data_path))
+        dataset = torchvision.datasets.CIFAR10(
+            root=data_path,
+            train=True,
+            transform=presets.ClassificationPresetTrainCifar10(
+                crop_size=crop_size,
+                auto_augment_policy=auto_augment_policy,
+                random_erase_prob=random_erase_prob))
+        print("Took", time.time() - st)
+
+        print("Loading validation data")
+        print("Loading dataset_test from {}".format(data_path))
+        dataset_test = torchvision.datasets.CIFAR10(
+            root=data_path,
+            train=False,
+            transform=presets.ClassificationPresetEvalCifar10(
+                crop_size=crop_size,
+                resize_size=resize_size,
+                interpolation=interpolation))
+    elif args.data_name == 'CIFAR100':
+        resize_size, crop_size = 32, 32  #TODO:  다시 고민 필요
+        interpolation = InterpolationMode.BILINEAR
+        data_path = '/host_server/raid/jihunyoon/data/image_classification/'
+        print("Loading training data")
+        st = time.time()
+        print("Loading dataset_train from {}".format(data_path))
+        dataset = torchvision.datasets.CIFAR100(
+            root=data_path,
+            train=True,
+            transform=presets.ClassificationPresetTrainCifar10(
+                crop_size=crop_size,
+                auto_augment_policy=auto_augment_policy,
+                random_erase_prob=random_erase_prob))
+        print("Took", time.time() - st)
+
+        print("Loading validation data")
+        print("Loading dataset_test from {}".format(data_path))
+        dataset_test = torchvision.datasets.CIFAR100(
+            root=data_path,
+            train=False,
+            transform=presets.ClassificationPresetEvalCifar10(
+                crop_size=crop_size,
+                resize_size=resize_size,
+                interpolation=interpolation))
 
     print("Creating data loaders")
     if args.distributed:
@@ -183,11 +221,8 @@ def main(args):
     device = torch.device(args.device)
 
     torch.backends.cudnn.benchmark = True
+    dataset, dataset_test, train_sampler, test_sampler = load_data(args)
 
-    train_dir = os.path.join(args.data_path, 'train')
-    val_dir = os.path.join(args.data_path, 'val')
-    dataset, dataset_test, train_sampler, test_sampler = load_data(
-        train_dir, val_dir, args)
     data_loader = torch.utils.data.DataLoader(dataset,
                                               batch_size=args.batch_size,
                                               sampler=train_sampler,
@@ -285,9 +320,7 @@ def get_args_parser(add_help=True):
     parser = argparse.ArgumentParser(
         description='PyTorch Classification Training', add_help=add_help)
 
-    parser.add_argument('--data-path',
-                        default='/datasets01/imagenet_full_size/061417/',
-                        help='dataset')
+    parser.add_argument('--data-name', help='dataset')
     parser.add_argument('--model', default='resnet18', help='model')
     parser.add_argument('--device', default='cuda', help='device')
     parser.add_argument('-b', '--batch-size', default=32, type=int)
