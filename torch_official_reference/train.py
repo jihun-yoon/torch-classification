@@ -40,9 +40,9 @@ def mlflow_log_args(args):
             mlflow.log_param(k, v)
 
 
-def mlflow_log_meters(k, v, epoch):
+def mlflow_log_meters(k, v, step):
     if utils.is_main_process():
-        mlflow.log_metric(k, v, epoch)
+        mlflow.log_metric(k, v, step)
 
 
 def mlflow_log_artifact(local_path, artifact_path):
@@ -242,7 +242,6 @@ def load_data(args):
                 resize_size=resize_size,
                 interpolation=interpolation))
 
-    print("Creating data loaders")
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
             dataset)
@@ -266,6 +265,7 @@ def main(args):
 
     utils.init_distributed_mode(args)
     print(args)
+
     start_mlflow_on_master(
     )  #TODO: Even if training is interrupted, MLflow run is set as finished.
     mlflow_log_args(args)
@@ -365,16 +365,14 @@ def main(args):
             utils.save_on_master(
                 checkpoint,
                 os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)))
-            utils.save_on_master(
-                checkpoint, os.path.join(args.output_dir, 'checkpoint.pth'))
+            #utils.save_on_master(
+            #    checkpoint, os.path.join(args.output_dir, 'checkpoint.pth'))
 
             mlflow_log_artifact(
                 os.path.join(args.output_dir, 'model_{}.pth'.format(epoch)),
                 'model')
-            mlflow_log_artifact(
-                os.path.join(args.output_dir, 'checkpoint.pth'), 'model')
-        #if args.mlflow_log_model:  #TODO: Bug
-        #mlflow.pytorch.log_model(model_without_ddp, f'model_epoch{epoch}')
+            #mlflow_log_artifact(
+            #    os.path.join(args.output_dir, 'checkpoint.pth'), 'model')
 
     total_time = time.time() - start_time
     total_time_str = str(datetime.timedelta(seconds=int(total_time)))
