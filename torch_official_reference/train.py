@@ -1,7 +1,7 @@
 import datetime
 import os
 import time
-
+import sys
 import torch
 import torch.utils.data
 from torch import nn
@@ -15,18 +15,20 @@ import mlflow
 import numpy as np
 import torch.distributed as dist
 
+from custom_resnet.kd_resnet import resnet8, resnet14, resnet20, resnet32, resnet44, resnet56, resnet110
+
 try:
     from apex import amp
 except ImportError:
     amp = None
 
 
-def start_mlflow_on_master():
+def start_mlflow_on_master(run_name):
     if utils.is_main_process():
         tracking_server_uri = "http://10.10.10.9:4499"
         mlflow.set_tracking_uri(tracking_server_uri)
         mlflow.set_experiment("cifar100")
-        mlflow.start_run()
+        mlflow.start_run(run_name)
 
 
 def end_mlflow_on_master():
@@ -83,7 +85,7 @@ def train_one_epoch(model,
             loss.backward()
         optimizer.step()
 
-        acc1, acc5 = utils.accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = utils.accuracy(output.softmax(dim=1), target, topk=(1, 5))
         batch_size = image.shape[0]
         metric_logger.update(loss=loss.item(),
                              lr=optimizer.param_groups[0]["lr"])
@@ -187,10 +189,7 @@ def load_data(args):
         dataset_test = torchvision.datasets.ImageNet(
             root=data_path,
             split='val',
-            transform=presets.ClassificationPresetEvalCifar10(
-                crop_size=crop_size,
-                resize_size=resize_size,
-                interpolation=interpolation))
+            transform=presets.ClassificationPresetEvalCifar10())
     elif args.data_name == 'CIFAR10':
         resize_size, crop_size = 32, 32  #TODO:  다시 고민 필요
         interpolation = InterpolationMode.BILINEAR
@@ -201,10 +200,7 @@ def load_data(args):
         dataset = torchvision.datasets.CIFAR10(
             root=data_path,
             train=True,
-            transform=presets.ClassificationPresetTrainCifar10(
-                crop_size=crop_size,
-                auto_augment_policy=auto_augment_policy,
-                random_erase_prob=random_erase_prob))
+            transform=presets.ClassificationPresetTrainCifar10())
         print("Took", time.time() - st)
 
         print("Loading validation data")
@@ -212,10 +208,7 @@ def load_data(args):
         dataset_test = torchvision.datasets.CIFAR10(
             root=data_path,
             train=False,
-            transform=presets.ClassificationPresetEvalCifar10(
-                crop_size=crop_size,
-                resize_size=resize_size,
-                interpolation=interpolation))
+            transform=presets.ClassificationPresetEvalCifar10())
     elif args.data_name == 'CIFAR100':
         resize_size, crop_size = 32, 32  #TODO:  다시 고민 필요
         interpolation = InterpolationMode.BILINEAR
@@ -226,10 +219,7 @@ def load_data(args):
         dataset = torchvision.datasets.CIFAR100(
             root=data_path,
             train=True,
-            transform=presets.ClassificationPresetTrainCifar10(
-                crop_size=crop_size,
-                auto_augment_policy=auto_augment_policy,
-                random_erase_prob=random_erase_prob))
+            transform=presets.ClassificationPresetTrainCifar10())
         print("Took", time.time() - st)
 
         print("Loading validation data")
@@ -237,10 +227,7 @@ def load_data(args):
         dataset_test = torchvision.datasets.CIFAR100(
             root=data_path,
             train=False,
-            transform=presets.ClassificationPresetEvalCifar10(
-                crop_size=crop_size,
-                resize_size=resize_size,
-                interpolation=interpolation))
+            transform=presets.ClassificationPresetEvalCifar10())
 
     if args.distributed:
         train_sampler = torch.utils.data.distributed.DistributedSampler(
@@ -252,6 +239,32 @@ def load_data(args):
         test_sampler = torch.utils.data.SequentialSampler(dataset_test)
 
     return dataset, dataset_test, train_sampler, test_sampler
+
+
+def initialize_train_model(model_name, classes):
+    model_ft = None
+    # ResNet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202
+
+    if model_name == "resnet8":
+        model_ft = resnet8(num_classes=classes)
+    elif model_name == "resnet14":
+        model_ft = resnet14(num_classes=classes)
+    elif model_name == "resnet20":
+        model_ft = resnet20(num_classes=classes)
+    elif model_name == "resnet32":
+        model_ft = resnet32(num_classes=classes)
+    elif model_name == "resnet44":
+        model_ft = resnet44(num_classes=classes)
+    elif model_name == "resnet56":
+        model_ft = resnet56(num_classes=classes)
+    elif model_name == "resnet110":
+        model_ft = resnet110(num_classes=classes)
+
+    else:
+        print("Invalid model name, exiting...")
+        sys.exit()
+
+    return model_ft
 
 
 def main(args):
@@ -267,6 +280,7 @@ def main(args):
     print(args)
 
     start_mlflow_on_master(
+        run_name=args.model
     )  #TODO: Even if training is interrupted, MLflow run is set as finished.
     mlflow_log_args(args)
 
@@ -288,7 +302,7 @@ def main(args):
                                                    pin_memory=True)
 
     print("Creating model")
-    model = torchvision.models.__dict__[args.model](pretrained=args.pretrained)
+    model = initialize_train_model(args.model, classes=args.data_classes)
     model.to(device)
     if args.distributed and args.sync_bn:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
@@ -318,9 +332,8 @@ def main(args):
                                           optimizer,
                                           opt_level=args.apex_opt_level)
 
-    lr_scheduler = torch.optim.lr_scheduler.StepLR(optimizer,
-                                                   step_size=args.lr_step_size,
-                                                   gamma=args.lr_gamma)
+    lr_scheduler = torch.optim.lr_scheduler.MultiStepLR(
+        optimizer, milestones=args.milestones, gamma=args.lr_gamma)
 
     model_without_ddp = model
     if args.distributed:
@@ -386,6 +399,7 @@ def get_args_parser(add_help=True):
         description='PyTorch Classification Training', add_help=add_help)
 
     parser.add_argument('--data-name', help='dataset')
+    parser.add_argument('--data-classes', type=int, help='dataset classes')
     parser.add_argument('--model', default='resnet18', help='model')
     parser.add_argument('--device', default='cuda', help='device')
     parser.add_argument('-b', '--batch-size', default=32, type=int)
@@ -412,15 +426,15 @@ def get_args_parser(add_help=True):
                         help='momentum')
     parser.add_argument('--wd',
                         '--weight-decay',
-                        default=1e-4,
+                        default=5e-4,
                         type=float,
                         metavar='W',
                         help='weight decay (default: 1e-4)',
                         dest='weight_decay')
-    parser.add_argument('--lr-step-size',
-                        default=30,
+    parser.add_argument('--milestones',
+                        nargs='+',
                         type=int,
-                        help='decrease lr every step-size epochs')
+                        help='decrease lr milestiones epochs')
     parser.add_argument('--lr-gamma',
                         default=0.1,
                         type=float,

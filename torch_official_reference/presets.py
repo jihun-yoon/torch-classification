@@ -49,27 +49,19 @@ class ClassificationPresetEval:
 
 
 class ClassificationPresetTrainCifar10:
-    def __init__(self,
-                 crop_size,
-                 mean=(0.4914, 0.4822, 0.4465),
-                 std=(0.2023, 0.1994, 0.2010),
-                 hflip_prob=0.5,
-                 auto_augment_policy=None,
-                 random_erase_prob=0.0):
-        trans = [transforms.RandomResizedCrop(crop_size)]
-        if hflip_prob > 0:
-            trans.append(transforms.RandomHorizontalFlip(hflip_prob))
-        if auto_augment_policy is not None:
-            aa_policy = autoaugment.AutoAugmentPolicy(auto_augment_policy)
-            trans.append(autoaugment.AutoAugment(policy=aa_policy))
-        trans.extend([
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
-        if random_erase_prob > 0:
-            trans.append(transforms.RandomErasing(p=random_erase_prob))
+    def __init__(
+            self,
+            crop_size=32,
+            mean=(0.5071, 0.4867, 0.4408),
+            std=(0.2675, 0.2565, 0.2761),
+    ):
 
-        self.transforms = transforms.Compose(trans)
+        self.transforms = transforms.Compose([
+            transforms.RandomCrop(crop_size, padding=4),
+            transforms.RandomHorizontalFlip(),
+            transforms.ToTensor(),
+            transforms.Normalize(mean, std)
+        ])
 
     def __call__(self, img):
         return self.transforms(img)
@@ -77,18 +69,12 @@ class ClassificationPresetTrainCifar10:
 
 class ClassificationPresetEvalCifar10:
     def __init__(self,
-                 crop_size,
-                 resize_size=32,
-                 mean=(0.4914, 0.4822, 0.4465),
-                 std=(0.2023, 0.1994, 0.2010),
-                 interpolation=InterpolationMode.BILINEAR):
+                 mean=(0.5071, 0.4867, 0.4408),
+                 std=(0.2675, 0.2565, 0.2761)):
 
-        self.transforms = transforms.Compose([
-            transforms.Resize(resize_size, interpolation=interpolation),
-            transforms.CenterCrop(crop_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=mean, std=std),
-        ])
+        self.transforms = transforms.Compose(
+            [transforms.ToTensor(),
+             transforms.Normalize(mean, std)])
 
     def __call__(self, img):
         return self.transforms(img)

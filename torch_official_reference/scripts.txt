@@ -1,18 +1,14 @@
-python -m torch.distributed.launch --nproc_per_node=8 --use_env train.py \
---data-name CIFAR100 --model resnet18 --epochs 200 \
---output-dir /host_server/raid/jihunyoon/data/image_classification/checkpoint/cifar100/resnet18
+
+python -m torch.distributed.launch --nproc_per_node=8 --master_port=25900 --use_env train.py \
+--data-name CIFAR100 --data-classes 100 --model resnet14 --batch-size 128 --epochs 200 --milestones 60 120 160  --cache-dataset \
+--output-dir /host_server/raid/jihunyoon/data/image_classification/checkpoint/cifar100/resnet14
+
+python -m torch.distributed.launch --nproc_per_node=8 --master_port=25900 --use_env train.py \
+--data-name CIFAR100 --data-classes 100 --model resnet32 --batch-size 128 --epochs 200 --milestones 60 120 160  --cache-dataset \
+--output-dir /host_server/raid/jihunyoon/data/image_classification/checkpoint/cifar100/resnet32
 
 
 python -m torch.distributed.launch --nproc_per_node=8 --master_port=25901 --use_env train.py \
---data-name CIFAR100 --model resnet34 --epochs 200 \
---output-dir /host_server/raid/jihunyoon/data/image_classification/checkpoint/cifar100/resnet34
+--data-name CIFAR100 --data-classes 100 --model resnet56 --batch-size 128 --epochs 200 --milestones 60 120 160  --cache-dataset \
+--output-dir /host_server/raid/jihunyoon/data/image_classification/checkpoint/cifar100/resnet56
 
-
-python -m torch.distributed.launch --nproc_per_node=8 --use_env train.py \
---data-name CIFAR100 --model resnet18 --epochs 200 \
---mlflow-log-model
-
-
-python -m torch.distributed.launch --nproc_per_node=8 --use_env train.py \
---data-name CIFAR100 --model resnet --epochs 200 \
---mlflow-log-model
